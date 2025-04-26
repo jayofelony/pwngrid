@@ -10,6 +10,7 @@ install:
 	@mkdir -p /etc/systemd/system/
 	@mkdir -p /etc/pwngrid/
 	@cp env.example /etc/pwngrid/pwngrid.conf
+	@cp pwngrid-peer.service /etc/systemd/system/
 	@systemctl daemon-reload
 
 clean:
