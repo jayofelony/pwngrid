@@ -1,6 +1,8 @@
 package models
 
-import "github.com/biezhi/gorm-paginator/pagination"
+import (
+	_ "github.com/jinzhu/gorm"
+)
 
 type UnitsByCountry struct {
 	Country string `json:"country"`
@@ -15,14 +17,30 @@ func GetUnitsByCountry() ([]UnitsByCountry, error) {
 	return results, nil
 }
 
+// GetPagedUnits returns a page of units, total number of units and total pages.
+// Uses a fixed limit of 25 per page to preserve previous behavior.
 func GetPagedUnits(page int) (units []Unit, total int, pages int) {
-	paginator := pagination.Paging(&pagination.Param{
-		DB:      db,
-		Page:    page,
-		Limit:   25,
-		OrderBy: []string{"id desc"},
-	}, &units)
-	return units, paginator.TotalRecord, paginator.TotalPage
+	const limit = 25
+	if page < 1 {
+		page = 1
+	}
+
+	var total64 int64
+	if err := db.Model(&Unit{}).Count(&total64).Error; err != nil {
+		return nil, 0, 0
+	}
+	total = int(total64)
+	if total == 0 {
+		return []Unit{}, 0, 0
+	}
+
+	offset := (page - 1) * limit
+	if err := db.Order("id desc").Limit(limit).Offset(offset).Find(&units).Error; err != nil {
+		return nil, 0, 0
+	}
+
+	pages = (total + limit - 1) / limit
+	return units, total, pages
 }
 
 func FindUnit(id uint) *Unit {

@@ -1,16 +1,29 @@
 package models
 
-import "github.com/biezhi/gorm-paginator/pagination"
-
 func (u *Unit) GetPagedInbox(page int) (messages []Message, total int, pages int) {
-	query := db.Model(Message{}).Where("receiver_id = ?", u.ID)
-	paginator := pagination.Paging(&pagination.Param{
-		DB:      query,
-		Page:    page,
-		Limit:   50,
-		OrderBy: []string{"id desc"},
-	}, &messages)
-	return messages, paginator.TotalRecord, paginator.TotalPage
+	const limit = 50
+	if page < 1 {
+		page = 1
+	}
+
+	query := db.Model(&Message{}).Where("receiver_id = ?", u.ID)
+
+	var total64 int64
+	if err := query.Count(&total64).Error; err != nil {
+		return nil, 0, 0
+	}
+	total = int(total64)
+	if total == 0 {
+		return []Message{}, 0, 0
+	}
+
+	offset := (page - 1) * limit
+	if err := query.Order("id desc").Limit(limit).Offset(offset).Find(&messages).Error; err != nil {
+		return nil, 0, 0
+	}
+
+	pages = (total + limit - 1) / limit
+	return messages, total, pages
 }
 
 func (u *Unit) GetInboxMessage(id int) *Message {

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -111,8 +113,8 @@ func NewPeer(radiotap *layers.RadioTap, dot11 *layers.Dot11, adv map[string]inte
 		DetectedAt: now,
 		SeenAt:     now,
 		PrevSeenAt: now,
-		Channel:    wifi.Freq2Chan(int(radiotap.ChannelFrequency)),
-		RSSI:       int(radiotap.DBMAntennaSignal),
+		Channel:    wifi.Freq2Chan(channelFromRadioTap(radiotap)),
+		RSSI:       dbmFromRadioTap(radiotap),
 		SessionID:  SessionID(dot11.Address3),
 		AdvData:    sync.Map{},
 	}
@@ -149,36 +151,6 @@ func NewPeer(radiotap *layers.RadioTap, dot11 *layers.Dot11, adv map[string]inte
 	} else if !found {
 		log.Debug("peer %s is not advertising any public key", fingerprint)
 	}
-
-	/*
-		No need for signature in the advertisement protocol, however:
-
-		signature64, found := adv["signature"].(string)
-		if !found {
-			return nil, fmt.Errorf("peer %s is advertising unsigned data", fingerprint)
-		}
-
-		signature, err := base64.StdEncoding.DecodeString(signature64)
-		if err != nil {
-			return nil, fmt.Errorf("error decoding peer %s signature: %s", fingerprint, err)
-		}
-
-		// the signature is SIGN(advertisement), so we need to remove the signature field and convert back to json.
-		// NOTE: fortunately, keys will be always sorted, so we don't have to do anything in order to guarantee signature
-		// consistency (https://stackoverflow.com/questions/18668652/how-to-produce-json-with-sorted-keys-in-go)
-		signedMap := adv
-		delete(signedMap, "signature")
-
-		signedData, err := json.Marshal(signedMap)
-		if err != nil {
-			return nil, fmt.Errorf("error packing data for signature verification: %v", err)
-		}
-
-		// verify the signature
-		if err = peer.Keys.VerifyMessage(signedData, signature); err != nil {
-			return nil, fmt.Errorf("peer %x signature is invalid", peer.SessionID)
-		}
-	*/
 
 	for key, value := range adv {
 		peer.AdvData.Store(key, value)
@@ -232,8 +204,8 @@ func (peer *Peer) Update(radio *layers.RadioTap, dot11 *layers.Dot11, adv map[st
 		}
 	*/
 
-	peer.Channel = wifi.Freq2Chan(int(radio.ChannelFrequency))
-	peer.RSSI = int(radio.DBMAntennaSignal)
+	peer.Channel = wifi.Freq2Chan(channelFromRadioTap(radio))
+	peer.RSSI = dbmFromRadioTap(radio)
 
 	if !bytes.Equal(peer.SessionID, dot11.Address3) {
 		log.Info("peer %s changed session id: %x -> %x", peer.ID(), peer.SessionIDStr, dot11.Address3)
@@ -383,4 +355,94 @@ func (peer *Peer) StartAdvertising(iface string) (err error) {
 func (peer *Peer) StopAdvertising() {
 	log.Debug("stopping advertiser ...")
 	peer.stop <- struct{}{}
+}
+
+// helper: extract channel frequency (MHz) from RadioTap
+func channelFromRadioTap(r *layers.RadioTap) int {
+	if r == nil {
+		return 0
+	}
+
+	// try direct exported field via reflection (works across gopacket versions)
+	rv := reflect.ValueOf(r)
+	if rv.Kind() == reflect.Ptr && !rv.IsNil() {
+		rv = rv.Elem()
+		if rv.IsValid() && rv.Kind() == reflect.Struct {
+			if f := rv.FieldByName("ChannelFrequency"); f.IsValid() {
+				switch f.Kind() {
+				case reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					return int(f.Uint())
+				case reflect.Int, reflect.Int32, reflect.Int64:
+					return int(f.Int())
+				}
+			}
+		}
+	}
+
+	// fallback: scan RadioTapValues for a 2-byte little-endian frequency
+	for _, ns := range r.RadioTapValues {
+		sv := reflect.ValueOf(ns)
+		if sv.Kind() == reflect.Struct {
+			for _, name := range []string{"Data", "Value"} {
+				if f := sv.FieldByName(name); f.IsValid() && f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.Uint8 {
+					b := f.Bytes()
+					if len(b) >= 2 {
+						freq := int(binary.LittleEndian.Uint16(b[:2]))
+						if freq >= 2000 && freq <= 6000 { // plausible WiFi freq
+							return freq
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return 0
+}
+
+// helper: extract dBm antenna signal (RSSI) from RadioTap
+func dbmFromRadioTap(r *layers.RadioTap) int {
+	if r == nil {
+		return 0
+	}
+
+	// try direct exported field via reflection
+	rv := reflect.ValueOf(r)
+	if rv.Kind() == reflect.Ptr && !rv.IsNil() {
+		rv = rv.Elem()
+		if rv.IsValid() && rv.Kind() == reflect.Struct {
+			if f := rv.FieldByName("DBMAntennaSignal"); f.IsValid() {
+				switch f.Kind() {
+				case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int:
+					return int(f.Int())
+				case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					u := f.Uint()
+					if u <= 0xFF {
+						return int(int8(uint8(u)))
+					}
+					return int(u)
+				}
+			}
+		}
+	}
+
+	// fallback: scan RadioTapValues for a 1-byte RSSI-like value (-150..0)
+	for _, ns := range r.RadioTapValues {
+		sv := reflect.ValueOf(ns)
+		if sv.Kind() == reflect.Struct {
+			for _, name := range []string{"Data", "Value"} {
+				if f := sv.FieldByName(name); f.IsValid() && f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.Uint8 {
+					b := f.Bytes()
+					if len(b) >= 1 {
+						rssi := int(int8(b[0]))
+						if rssi <= 0 && rssi >= -150 {
+							return rssi
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return 0
 }
