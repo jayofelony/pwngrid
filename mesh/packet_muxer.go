@@ -6,6 +6,7 @@ import (
 	"github.com/evilsocket/islazy/log"
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/pcap"
+	"os"
 	"strings"
 	"time"
 )
@@ -14,7 +15,23 @@ const (
 	// ErrIfaceNotUp Ugly, but gopacket folks are not exporting pcap errors, so ...
 	// ref. https://github.com/gopacket/gopacket/blob/96986c90e3e5c7e01deed713ff8058e357c0c047/pcap/pcap.go#L281
 	ErrIfaceNotUp = "Interface Not Up"
+
+	// arphrdIEEE80211Radiotap is the ARPHRD_IEEE80211_RADIOTAP type the kernel
+	// reports in sysfs for an interface that's already in 802.11 monitor mode.
+	arphrdIEEE80211Radiotap = "803"
 )
+
+// isMonitorMode reports whether iface is already in 802.11 monitor mode, so we
+// can skip asking libpcap to set rfmon on an interface that's already there
+// (some libpcap 1.10.x builds fail that redundant request even though the
+// interface itself is perfectly capturable).
+func isMonitorMode(iface string) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/type", iface))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == arphrdIEEE80211Radiotap
+}
 
 var (
 	SnapLength  = 65536
@@ -54,7 +71,9 @@ func NewPacketMuxer(iface, filter string, workers int) (mux *PacketMuxer, err er
 		}
 		defer inactiveHandle.CleanUp()
 
-		if err = inactiveHandle.SetRFMon(true); err != nil {
+		if isMonitorMode(iface) {
+			log.Debug("interface %s is already in monitor mode, skipping SetRFMon", iface)
+		} else if err = inactiveHandle.SetRFMon(true); err != nil {
 			log.Warning("error while setting interface %s in monitor mode: %s", iface, err)
 		}
 
