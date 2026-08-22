@@ -63,7 +63,13 @@ func MakeLocalPeer(name string, keys *crypto.KeyPair, advertise bool) *Peer {
 		AdvData:       sync.Map{},
 		AdvPeriod:     SignalingPeriod,
 		stop:          make(chan struct{}),
-		advEnabled:    false,
+		// advertising starts enabled whenever -advertise is true, instead of
+		// staying off until pwnagotchi's one-time startup call to
+		// /api/v1/mesh/true flips it on: that call never repeats, so if
+		// pwngrid-peer restarts independently of pwnagotchi (systemd
+		// Restart=always, wlan0mon races, etc.) advertising silently stays
+		// off for the rest of the process's life with no error anywhere.
+		advEnabled:    advertise,
 		ForceDisabled: false,
 	}
 	if !advertise {
