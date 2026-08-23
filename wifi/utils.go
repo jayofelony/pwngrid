@@ -19,7 +19,7 @@ func IsBroadcast(dot11 *layers.Dot11) bool {
 }
 
 func Freq2Chan(freq int) int {
-	if freq <= 2472 {
+	if freq >= 2412 && freq <= 2472 {
 		return ((freq - 2412) / 5) + 1
 	} else if freq == 2484 {
 		return 14
